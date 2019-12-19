@@ -6,6 +6,8 @@ from threading import Event
 from functools import wraps
 
 import string
+from threading import Event
+
 try:
     from typing import List, Dict, Optional, Callable, Tuple, TypeVar, Type, Any
     from typing import TYPE_CHECKING
@@ -270,12 +272,8 @@ def with_services(service_type=None,
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             def on_complete(services):
-                if kwargs:
-                    kwargs['services'] = services
-                    return func(self, *args, **kwargs)
-                else:
-                    args_ = args + (services,)
-                    return func(self, *args_, **kwargs)
+                kwargs['services'] = services
+                return func(self, *args, **kwargs)
             return self._get_services(service_type=service_type,
                                       service_name=service_name,
                                       service_id=service_id,
@@ -400,6 +398,8 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
             self.inventory = dict()
         self.log.debug('Loaded inventory %s' % self.inventory)
 
+        self.to_remove_osds = set()  # TODO: load them from mon store
+
         # The values are cached by instance.
         # cache is invalidated by
         # 1. timeout
@@ -424,6 +424,8 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
         for h in self.service_cache:
             if h not in self.inventory:
                 del self.service_cache[h]
+        self.run = True
+        self.event = Event()
 
     def shutdown(self):
         self.log.info('shutdown')
@@ -754,6 +756,11 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
                     orchestrator.raise_if_exception(completion)
                 self.log.debug('did _do_upgrade')
 
+            self._check_for_strays()
+
+            # the replace part
+            self._remove_osds_bg()
+            self.log.debug("after starting _remove_osds_bg")
             sleep_interval = 600
             self.log.debug('Sleeping for %d seconds', sleep_interval)
             ret = self.event.wait(sleep_interval)
@@ -1543,17 +1550,145 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
 
         return "Created osd(s) on host '{}'".format(host)
 
-    @with_services('osd')
-    def remove_osds(self, osd_ids, services):
-        # type: (List[str], List[orchestrator.ServiceDescription]) -> AsyncCompletion
-        args = [(d.name(), d.nodename) for d in services if
-                d.service_instance in osd_ids]
+    def create_osds(self, drive_group):
+        """
+        Create a new osd.
 
-        found = list(zip(*args))[0] if args else []
-        not_found = {osd_id for osd_id in osd_ids if 'osd.%s' % osd_id not in found}
+        The orchestrator CLI currently handles a narrow form of drive
+        specification defined by a single block device using bluestore.
+
+        :param drive_group: osd specification
+
+        TODO:
+          - support full drive_group specification
+          - support batch creation
+        """
+
+        return self.get_hosts().then(lambda hosts: self._create_osd(hosts, drive_group))
+
+    def _remove_osds_bg(self):
+        # type: () -> bool
+
+        self.log.debug(f"OSDs that are scheduled for removal: {self.to_remove_osds}")
+        remove_osds = self.to_remove_osds.copy()
+        for osd in remove_osds:
+            if not osd.destroy_flag:
+                # skip criteria
+                if not self.is_empty():
+                    self.log.info(f"OSD <{osd.osd_id}> is not empty yet. Waiting a bit more")
+                    continue
+
+            if not self.ok_to_destroy([osd.osd_id]):
+                self.log.info(f"OSD <{osd.osd_id}> is not safe-to-destroy yet. Waiting a bit more")
+                continue
+
+            # abort criteria
+            if not self.down_osd([osd.osd_id]):
+                # also remove it from the remove_osd list and set a health_check warning?
+                raise orchestrator.OrchestratorError(f"Couldn't set OSD <{osd.osd_id}> to 'down'")
+
+            if not self.destroy_osd(osd.osd_id):
+                # also remove it from the remove_osd list and set a health_check warning?
+                raise orchestrator.OrchestratorError(f"Couldn't destroy OSD <{osd.osd_id}>")
+
+            completion = self._remove_daemon([(osd.fullname, osd.nodename)])
+            if completion:
+                # so, if this is a asynccompletion.. I probably have to wait for it.. or it needs to be the
+                # last operation? or work with .then.. but it must not be blocking io..
+                self._orchestrator_wait([completion])
+                orchestrator.raise_if_exception(completion)
+                self.log.debug('services %s' % completion.result)
+            else:
+                self.log.error('No completion object from _remove_daemon received')
+                raise orchestrator.OrchestratorError(f"Couldn't remove daemon for OSD <{osd.osd_id}>")
+            self.log.info(f"Successfully removed removed OSD <{osd.osd_id}> on {osd.nodename}")
+            self.log.debug(f"Removing {osd.osd_id} from the queue.")
+            self.to_remove_osds.remove(osd)
+
+    def is_empty(self) -> bool:
+        # MONKEYPATCH
+        return True
+        # MONKEYPATCH
+        ret, out, err = self.mon_command({
+            'prefix': 'osd drain status',
+        })
+        # this is probably str? implement a json format type in osd drain status
+        if ret != 0:
+            self.log.error(f"Calling osd drain status failed with {err}")
+            return False
+        for o in out:
+            if o.get('osd_id', '') == str(osd_id):
+                # is this str also?
+                if o.get('pgs') == 0:
+                    return True
+        return False
+
+    def ok_to_destroy(self, osd_ids: List[int]) -> bool:
+        cmd_args = {'prefix': 'osd safe-to-destroy',
+                    'ids': osd_ids}
+        return self._run_mon_cmd(cmd_args)
+
+    def destroy_osd(self, osd_id: int) -> bool:
+        cmd_args = {'prefix': 'osd destroy-actual',
+                    'id': int(osd_id),
+                    'yes_i_really_mean_it': True}
+        return self._run_mon_cmd(cmd_args)
+
+    def down_osd(self, osd_ids: List[int]) -> bool:
+        cmd_args = {
+            'prefix': 'osd down',
+            'ids': osd_ids,
+        }
+        return self._run_mon_cmd(cmd_args)
+
+    def purge_osd(self, osd_id: List[int]) -> bool:
+        cmd_args = {
+            'prefix': 'osd purge',
+            'id': osd_id,
+            'yes_i_really_mean_it': True
+        }
+        return self._run_mon_cmd(cmd_args)
+
+    def out_osd(self, osd_ids: List[int]) -> bool:
+        cmd_args = {
+            'prefix': 'osd out',
+            'ids': osd_ids,
+        }
+        return self._run_mon_cmd(cmd_args)
+
+    def _run_mon_cmd(self, cmd_args: dict) -> bool:
+        ret, out, err = self.mon_command(cmd_args)
+        if ret != 0:
+            self.log.debug(f"ran {cmd_args} with mon_command")
+            self.log.error(f"cmd: {cmd_args.get('prefix')} failed with: {err}. (errno:{ret})")
+            return False
+        self.log.debug(f"cmd: {cmd_args.get('prefix')} returns: {out}")
+        return True
+
+    @with_services('osd')
+    def remove_osds(self, osd_ids, destroy=False, services=[]):
+        # type: (List[str], bool, List[orchestrator.ServiceDescription]) -> AsyncCompletion
+
+        # args = [(d.name(), d.nodename) for d in services if d.service_instance in osd_ids]
+
+        from collections import namedtuple
+        osd_spec = namedtuple('OSD', ['osd_id', 'destroy_flag', 'nodename', 'fullname'])
+
+        found = list()
+        for service in services:
+            if service.service_instance not in osd_ids:
+                continue
+            found.append(osd_spec(service.service_instance, destroy, service.nodename, service.name()))
+
+        not_found = {osd_id for osd_id in osd_ids if osd_id not in [x.osd_id for x in found]}
+        self.log.error(f"not_found: {not_found}")
+        self.log.debug(f"found: {found}")
+        self.log.debug(f"osd_ids: {osd_ids}")
         if not_found:
             raise OrchestratorError('Unable to find OSD: %s' % not_found)
-        return self._remove_daemon(args)
+        self.log.info(f"Scheduling OSDs {osd_ids} for removal")
+        [self.to_remove_osds.add(x) for x in found]
+        return trivial_result(f"Scheduled OSDs {osd_ids} for removal")
 
     def _create_daemon(self, daemon_type, daemon_id, host,
                        keyring=None,
@@ -1645,7 +1780,7 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
         """
         out, err, code = self._run_cephadm(
             host, name, 'rm-daemon',
-            ['--name', name])
+            ['--name', name, '--force'])
         self.log.debug('_remove_daemon code %s out %s' % (code, out))
         self.service_cache.invalidate(host)
         return "Removed {} from host '{}'".format(name, host)
@@ -1962,7 +2097,7 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
             for d in daemons:
                 if d.service_instance == name or d.service_instance.startswith(name + '.'):
                     args.append(('%s.%s' % (d.service_type, d.service_instance),
-                                d.nodename))
+                                 d.nodename))
             if args:
                 return self._remove_daemon(args)
             raise RuntimeError('Unable to find rgw.%s[-*] daemon(s)' % name)
@@ -2106,7 +2241,7 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
             if self.upgrade_state.get('target_name') != target_name:
                 raise OrchestratorError(
                     'Upgrade to %s (not %s) already in progress' %
-                (self.upgrade_state.get('target_name'), target_name))
+                    (self.upgrade_state.get('target_name'), target_name))
             if self.upgrade_state.get('paused'):
                 del self.upgrade_state['paused']
                 self._save_upgrade_state()
