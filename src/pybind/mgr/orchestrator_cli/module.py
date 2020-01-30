@@ -375,18 +375,45 @@ Usage:
 
     @orchestrator._cli_write_command(
         'orchestrator osd rm',
-        "name=svc_id,type=CephString,n=N",
+        "name=svc_id,type=CephString,n=N "
+        "name=replace,type=CephBool,req=false "
+        "name=force,type=CephBool,req=false",
         'Remove OSD services')
-    def _osd_rm(self, svc_id):
-        # type: (List[str]) -> HandleCommandResult
-        """
-        Remove OSD's
-        :cmd : Arguments for remove the osd
-        """
-        completion = self.remove_osds(svc_id)
+    def _osd_rm(self, svc_id, replace=False, force=False):
+        # type: (List[str], bool, bool) -> HandleCommandResult
+        completion = self.remove_osds(svc_id, replace, force)
         self._orchestrator_wait([completion])
         orchestrator.raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
+
+    @orchestrator._cli_write_command(
+        'orchestrator osd rm status',
+        "name=replace,type=CephBool,req=false",
+        # TODO: remove this line  ^^^^^
+        'status of OSD removal operation')
+    def _osd_rm_status(self):
+        # type: () -> HandleCommandResult
+        completion = self.remove_osds_status()
+        self._orchestrator_wait([completion])
+        orchestrator.raise_if_exception(completion)
+        report = completion.result
+        if len(report) == 0:
+            return HandleCommandResult(stdout="No OSD remove/replace operations reported")
+        elif format == 'json':
+            # TODO: verify if that works
+            return HandleCommandResult(stdout=json.dumps(report))
+        else:
+            table = PrettyTable(
+                ['NAME', 'HOST', 'PGS', 'STARTED_AT'],
+                border=False)
+            table.align = 'l'
+            table.left_padding_width = 0
+            table.right_padding_width = 1
+            # TODO: re-add sorted and sort by pg_count
+            for osd, status in report.items():
+                table.add_row((osd.fullname, osd.nodename, status, osd.started_at))
+
+            return HandleCommandResult(stdout=table.get_string())
 
     @orchestrator._cli_write_command(
         'orchestrator rbd-mirror add',
