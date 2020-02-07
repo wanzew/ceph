@@ -351,7 +351,7 @@ Usage:
             try:
                 dgs = DriveGroupSpecs(yaml.load(inbuf))
                 drive_groups = dgs.drive_groups
-            except ValueError as e:
+            except (ValueError, DriveGroupValidationError) as e:
                 msg = 'Failed to read JSON input: {}'.format(str(e)) + usage
                 return HandleCommandResult(-errno.EINVAL, stderr=msg)
 
@@ -384,6 +384,49 @@ Usage:
         :cmd : Arguments for remove the osd
         """
         completion = self.remove_osds(svc_id)
+        self._orchestrator_wait([completion])
+        orchestrator.raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
+    @orchestrator._cli_write_command(
+        'orchestrator osd drivegroups show',
+        'name=format,type=CephChoices,strings=json|plain,req=false',
+        'Get DriveGroups from mon store')
+    def _drivegroups_show(self, format='plain'):
+        # type: (Optional[str]) -> HandleCommandResult
+        completion = self.show_drivegroups()
+        self._orchestrator_wait([completion])
+        orchestrator.raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
+    @orchestrator._cli_write_command(
+        'orchestrator osd drivegroups set',
+        "name=dg_string,type=CephString,req=false",
+        'Save DriveGroups to mon store')
+    def _drivegroups_set(self, dg_string=None, inbuf=None):
+        # type: (str, Optional[str]) -> HandleCommandResult
+
+        usage = """
+        Usage:
+          ceph orchestrator osd drivegroup set -i <json_file/yaml_file>
+          ceph orchestrator osd drivegroup set {'drive_group_foo: ...'}
+        """
+        if inbuf:
+            try:
+                content = yaml.load(inbuf)
+                DriveGroupSpecs(content)
+                completion = self.set_drivegroups(content)
+            except (ValueError, DriveGroupValidationError) as e:
+                msg = 'Failed to read JSON input: {}'.format(str(e)) + usage
+                return HandleCommandResult(-errno.EINVAL, stderr=msg)
+        elif dg_string:
+            try:
+                DriveGroupSpecs(dg_string)
+                completion = self.set_drivegroups(dg_string)
+            except (AttributeError, DriveGroupValidationError) as e:
+                return HandleCommandResult(-errno.EINVAL, stderr=usage)
+        else:
+            return HandleCommandResult(-errno.EINVAL, stderr=usage)
         self._orchestrator_wait([completion])
         orchestrator.raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())

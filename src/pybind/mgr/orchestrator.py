@@ -884,6 +884,20 @@ class Orchestrator(object):
         """
         raise NotImplementedError()
 
+    def show_drivegroups(self):
+        # type: () -> Completion
+        """
+        Shows drivegroups configured in the mon store
+        """
+        raise NotImplementedError()
+
+    def set_drivegroups(self, content):
+        # type: (str) -> Completion
+        """
+        Edits drivegroups and saves it back to the mon store
+        """
+        raise NotImplementedError()
+
     def blink_device_light(self, ident_fault, on, locations):
         # type: (str, bool, List[DeviceLightLoc]) -> Completion
         """

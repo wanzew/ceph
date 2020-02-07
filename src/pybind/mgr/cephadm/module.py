@@ -1975,6 +1975,14 @@ class CephadmOrchestrator(MgrModule, orchestrator.OrchestratorClientMixin):
 
         return self._get_services('rgw').then(_remove_rgw)
 
+    def show_drivegroups(self):
+        # TODO: Currently exclusive to cephadm, maybe this can be moved to orchestrator.py
+        return trivial_result(self.get_store("drivegroups"))
+
+    def set_drivegroups(self, content):
+        # TODO: Currently exclusive to cephadm, maybe this can be moved to orchestrator.py
+        return trivial_result(self.set_store("drivegroups", str(content)))
+
     def update_rgw(self, spec):
         spec = NodeAssignment(spec=spec, get_hosts_func=self._get_hosts, service_type='rgw').load()
         return self._update_service('rgw', self.add_rgw, spec)
