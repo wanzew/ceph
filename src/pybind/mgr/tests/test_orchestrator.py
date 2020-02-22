@@ -6,10 +6,11 @@ from tests import mock
 import pytest
 
 from ceph.deployment import inventory
-from orchestrator import raise_if_exception, RGWSpec, Completion, ProgressReference
-from orchestrator import InventoryNode, ServiceDescription
+from orchestrator import raise_if_exception, RGWSpec, Completion, ProgressReference, \
+    servicespec_validate_add
+from orchestrator import InventoryNode, ServiceDescription, DaemonDescription
 from orchestrator import OrchestratorValidationError
-from orchestrator import parse_host_placement_specs
+from orchestrator import HostPlacementSpec
 
 
 @pytest.mark.parametrize("test_input,expected, require_network",
@@ -25,7 +26,7 @@ from orchestrator import parse_host_placement_specs
                           ("myhost:[v1:10.1.1.10:6789,v2:10.1.1.11:3000]=sname", ('myhost', '[v1:10.1.1.10:6789,v2:10.1.1.11:3000]', 'sname'), True),
                           ])
 def test_parse_host_placement_specs(test_input, expected, require_network):
-    ret = parse_host_placement_specs(test_input, require_network=require_network)
+    ret = HostPlacementSpec.parse(test_input, require_network=require_network)
     assert ret == expected
     assert str(ret) == test_input
 
@@ -39,7 +40,7 @@ def test_parse_host_placement_specs(test_input, expected, require_network):
                           ])
 def test_parse_host_placement_specs_raises(test_input):
     with pytest.raises(ValueError):
-        ret = parse_host_placement_specs(test_input)
+        ret = HostPlacementSpec.parse(test_input)
 
 
 def _test_resource(data, resource_class, extra=None):
@@ -81,13 +82,13 @@ def test_inventory():
             InventoryNode.from_json(data)
 
 
-def test_service_description():
+def test_daemon_description():
     json_data = {
         'nodename': 'test',
-        'service_type': 'mon',
-        'service_instance': 'a'
+        'daemon_type': 'mon',
+        'daemon_id': 'a'
     }
-    _test_resource(json_data, ServiceDescription, {'abc': False})
+    _test_resource(json_data, DaemonDescription, {'abc': False})
 
 
 def test_raise():
@@ -110,7 +111,7 @@ def test_rgwspec():
     """
     example = json.loads(test_rgwspec.__doc__.strip())
     spec = RGWSpec.from_json(example)
-    assert spec.validate_add() is None
+    assert servicespec_validate_add(spec) is None
 
 
 def test_promise():

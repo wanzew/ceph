@@ -197,7 +197,7 @@ def gen_pool_names(volname):
     """
     return "cephfs.{}.meta".format(volname), "cephfs.{}.data".format(volname)
 
-def create_volume(mgr, volname):
+def create_volume(mgr, volname, placement):
     """
     create volume  (pool, filesystem and mds)
     """
@@ -220,7 +220,7 @@ def create_volume(mgr, volname):
         remove_pool(metadata_pool)
         return r, outb, outs
     # create mds
-    return create_mds(mgr, volname)
+    return create_mds(mgr, volname, placement)
 
 def delete_volume(mgr, volname):
     """
@@ -228,7 +228,7 @@ def delete_volume(mgr, volname):
     """
     # Tear down MDS daemons
     try:
-        completion = mgr.remove_mds(volname)
+        completion = mgr.remove_service('mds.' + volname)
         mgr._orchestrator_wait([completion])
         orchestrator.raise_if_exception(completion)
     except (ImportError, orchestrator.OrchestratorError):

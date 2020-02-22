@@ -19,7 +19,7 @@ prefer a WebUI over using the command line.
 
 The new :term:`Ceph Dashboard` module is a replacement of the previous one and
 adds a built-in web based monitoring and administration application to the Ceph
-Manager. The architecture and functionality of this new plugin is derived from
+Manager. The architecture and functionality of this new module is derived from
 and inspired by the `openATTIC Ceph management and monitoring tool
 <https://openattic.org/>`_. The development is actively driven by the team
 behind openATTIC at `SUSE <https://www.suse.com/>`_, with a lot of support from
@@ -675,6 +675,9 @@ User Accounts
 Ceph Dashboard supports managing multiple user accounts. Each user account
 consists of a username, a password (stored in encrypted form using ``bcrypt``),
 an optional name, and an optional email address.
+
+If a new user is created via Web UI, it is possible to set an option that this
+user must assign a new password when they log in for the first time.
 
 User accounts are stored in MON's configuration database, and are globally
 shared across all ceph-mgr instances.

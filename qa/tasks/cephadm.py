@@ -9,6 +9,7 @@ import contextlib
 import logging
 import os
 import json
+import re
 import uuid
 
 from ceph_manager import CephManager
@@ -22,7 +23,7 @@ from teuthology.config import config as teuth_config
 # these items we use from ceph.py should probably eventually move elsewhere
 from tasks.ceph import get_mons, healthy
 
-CEPH_ROLE_TYPES = ['mon', 'mgr', 'osd', 'mds', 'rgw']
+CEPH_ROLE_TYPES = ['mon', 'mgr', 'osd', 'mds', 'rgw', 'prometheus']
 
 log = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def download_cephadm(ctx, config, ref):
         if git_url.startswith('https://github.com/'):
             # git archive doesn't like https:// URLs, which we use with github.
             rest = git_url.split('https://github.com/', 1)[1]
-            rest.replace('.git/', '/')  # no .git suffix
+            rest = re.sub(r'\.git/?$', '', rest).strip() # no .git suffix
             ctx.cluster.run(
                 args=[
                     'curl', '--silent',
@@ -100,10 +101,7 @@ def download_cephadm(ctx, config, ref):
                     run.Raw('>'),
                     ctx.cephadm,
                     run.Raw('&&'),
-                    'test', '-s',
-                    ctx.cephadm,
-                    run.Raw('&&'),
-                    'chmod', '+x',
+                    'ls', '-l',
                     ctx.cephadm,
                 ],
             )
@@ -118,14 +116,19 @@ def download_cephadm(ctx, config, ref):
                     'tar', '-xO', 'src/cephadm/cephadm',
                     run.Raw('>'),
                     ctx.cephadm,
-                    run.Raw('&&'),
-                    'test', '-s',
-                    ctx.cephadm,
-                    run.Raw('&&'),
-                    'chmod', '+x',
-                    ctx.cephadm,
                 ],
             )
+        # sanity-check the resulting file and set executable bit
+        cephadm_file_size = '$(stat -c%s {})'.format(ctx.cephadm)
+        ctx.cluster.run(
+            args=[
+                'test', '-s', ctx.cephadm,
+                run.Raw('&&'),
+                'test', run.Raw(cephadm_file_size), "-gt", run.Raw('1000'),
+                run.Raw('&&'),
+                'chmod', '+x', ctx.cephadm,
+            ],
+        )
 
     try:
         yield
@@ -421,7 +424,7 @@ def ceph_bootstrap(ctx, config):
             r = _shell(ctx, cluster_name, remote,
                        ['ceph', 'orch', 'host', 'ls', '--format=json'],
                        stdout=StringIO())
-            hosts = [node['host'] for node in json.loads(r.stdout.getvalue())]
+            hosts = [node['hostname'] for node in json.loads(r.stdout.getvalue())]
             assert remote.shortname in hosts
 
         yield
@@ -642,9 +645,9 @@ def ceph_mdss(ctx, config):
     yield
 
 @contextlib.contextmanager
-def ceph_prometheus(ctx, config):
+def ceph_monitoring(daemon_type, ctx, config):
     """
-    Deploy prometheus
+    Deploy prometheus, node-exporter, etc.
     """
     cluster_name = config['cluster']
     fsid = ctx.ceph[cluster_name].fsid
@@ -653,20 +656,20 @@ def ceph_prometheus(ctx, config):
     daemons = {}
     for remote, roles in ctx.cluster.remotes.items():
         for role in [r for r in roles
-                    if teuthology.is_type('prometheus', cluster_name)(r)]:
+                    if teuthology.is_type(daemon_type, cluster_name)(r)]:
             c_, _, id_ = teuthology.split_role(role)
             log.info('Adding %s on %s' % (role, remote.shortname))
             nodes.append(remote.shortname + '=' + id_)
             daemons[role] = (remote, id_)
     if nodes:
         _shell(ctx, cluster_name, remote, [
-            'ceph', 'orch', 'apply', 'prometheus',
+            'ceph', 'orch', 'apply', daemon_type,
             str(len(nodes))] + nodes
         )
     for role, i in daemons.items():
         remote, id_ = i
         ctx.daemons.register_daemon(
-            remote, 'prometheus', id_,
+            remote, daemon_type, id_,
             cluster=cluster_name,
             fsid=fsid,
             logger=log.getChild(role),
@@ -1039,7 +1042,8 @@ def task(ctx, config):
             lambda: ceph_osds(ctx=ctx, config=config),
             lambda: ceph_mdss(ctx=ctx, config=config),
             lambda: ceph_rgw(ctx=ctx, config=config),
-            lambda: ceph_prometheus(ctx=ctx, config=config),
+            lambda: ceph_monitoring('prometheus', ctx=ctx, config=config),
+            lambda: ceph_monitoring('node-exporter', ctx=ctx, config=config),
             lambda: ceph_clients(ctx=ctx, config=config),
             lambda: distribute_config_and_admin_keyring(ctx=ctx, config=config),
     ):
